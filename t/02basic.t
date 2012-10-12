@@ -38,7 +38,7 @@ eval {
 
 my %args = (
   redis_conn => $conn,
-  proc_name => "foo",
+  proc_info => "foo",
   type => 'Redis',
   key_name => 'mylock',
 );
@@ -75,9 +75,6 @@ SCOPE: {
   $id2 = $limit2->get_lock();
   is($id2, 1, 'Got other lock after first was released');
 }
-
-done_testing;
-exit();
 
 SCOPE: {
   my $limit = IPC::ConcurrencyLimit->new(%args, max_procs => 2);
@@ -135,4 +132,5 @@ SCOPE: {
   }
 }
 
+done_testing;
 

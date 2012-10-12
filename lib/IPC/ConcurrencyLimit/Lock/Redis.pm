@@ -14,19 +14,19 @@ use IPC::ConcurrencyLimit::Lock;
 our @ISA = qw(IPC::ConcurrencyLimit::Lock);
 
 use Class::XSAccessor
-  getters => [qw(redis_conn max_procs key_name proc_name script_cache)];
+  getters => [qw(redis_conn max_procs key_name proc_info script_cache)];
 
 # TODO optional expire
 our $LuaScript_GetLock = q{
   local key = KEYS[1]
   local max_procs = ARGV[1]
-  local proc_name = ARGV[2]
+  local proc_info = ARGV[2]
   local i
 
   for i = 1, max_procs, 1 do
     local x = redis.call('hexists', key, i)
     if x == 0 then
-      redis.call('hset', key, i, proc_name)
+      redis.call('hset', key, i, proc_info)
       return i
     end
   end
@@ -59,28 +59,28 @@ sub new {
   $sc->register_script(\$LuaScript_GetLock, $LuaScriptHash_GetLock);
   $sc->register_script(\$LuaScript_ReleaseLock, $LuaScriptHash_ReleaseLock);
 
-  my $proc_name = $opt->{proc_name};
-  $proc_name = time() if not defined $proc_name;
+  my $proc_info = $opt->{proc_info};
+  $proc_info = time() if not defined $proc_info;
   my $self = bless {
     max_procs    => $max_procs,
     redis_conn   => $redis_conn,
     key_name     => $key_name,
     id           => undef,
     script_cache => $sc,
-    proc_name    => $proc_name,
+    proc_info    => $proc_info,
   } => $class;
 
-  $self->_get_lock($key_name, $max_procs, $sc, $proc_name)
+  $self->_get_lock($key_name, $max_procs, $sc, $proc_info)
     or return undef;
 
   return $self;
 }
 
 sub _get_lock {
-  my ($self, $key, $max_procs, $script_cache, $proc_name) = @_;
+  my ($self, $key, $max_procs, $script_cache, $proc_info) = @_;
 
   my ($rv) = $script_cache->run_script(
-    $LuaScriptHash_GetLock, [1, $key, $max_procs, $proc_name]
+    $LuaScriptHash_GetLock, [1, $key, $max_procs, $proc_info]
   );
 
   if (defined $rv and $rv > 0) {
@@ -121,6 +121,15 @@ IPC::ConcurrencyLimit::Lock::Redis - Locking via Redis
 =head1 SYNOPSIS
 
   use IPC::ConcurrencyLimit;
+  use Redis;
+  my $redis = Redis->new(server => ...);
+  my $limit = IPC::ConcurrencyLimit->new(
+    type       => 'Redis',
+    max_procs  => 1, # defaults to 1
+    redis_conn => $redis,
+    key_name   => "mylock",
+    # proc_info  => "...", # optional value to store. Default: time()
+  );
 
 =head1 DESCRIPTION
 
