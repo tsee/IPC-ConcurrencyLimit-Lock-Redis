@@ -120,8 +120,11 @@ IPC::ConcurrencyLimit::Lock::Redis - Locking via Redis
 
 =head1 SYNOPSIS
 
+  # see also: IPC::ConcurrencyLimit::Lock
+  
   use IPC::ConcurrencyLimit;
   use Redis;
+  
   my $redis = Redis->new(server => ...);
   my $limit = IPC::ConcurrencyLimit->new(
     type       => 'Redis',
@@ -130,13 +133,70 @@ IPC::ConcurrencyLimit::Lock::Redis - Locking via Redis
     key_name   => "mylock",
     # proc_info  => "...", # optional value to store. Default: time()
   );
+  
+  my $id = $limit->get_lock;
+  if (not $id) {
+    warn "Couldn't get lock";
+    exit();
+  }
+  
+  # do work
 
 =head1 DESCRIPTION
 
-This locking strategy uses L<Redis> to implement
-locking ...
+This module requires a Redis server that supports Lua
+scripting.
 
-FIXME explain gotchas about leaving locks around...
+This locking strategy uses L<Redis> to implement an
+C<IPC::ConcurrencyLimit> lock type. This particular
+Redis-based lock implementation uses a single Redis
+hash (a hash in a single Redis key) as storage for
+tracking the locks.
+
+=head2 Lock Implementation on the Server
+
+The structure of the lock on the server is not considered an
+implementation detail, but part of the public interface.
+So long it is inspected and modified atomically, you can
+choose to modify it through different channels than the API of
+this class.
+
+This is important because the lock is released in the
+lock object's destructor, so if a perl process segfaults
+or on network failure between the process and Redis
+then the lock cannot be released! More on that below.
+
+Given a lock C<"mylock"> with a C<max_procs> setting
+of 5 (default: 1) and three out of five lock instances taken,
+the lock structure in Redis would look as follows:
+
+  "mylock": {
+                "1": "some info",
+                "2": "some other",
+                "3": "yet other info"
+            }
+
+If subsequently lock number 2 is released, the structure
+becomes:
+
+  "mylock": {
+                "1": "some info",
+                "3": "yet other info"
+            }
+
+The next lock to be obtained would again use entry number 2.
+When creating a lock object, you may pass a C<proc_info>
+parameter. This parameter (string) will be used as the value
+of the corresponding hash entry (C<"some info">, etc. above).
+The C<proc_info> value defaults to the current epoch time
+on the client.
+
+The C<proc_info> properties may be used to evict stale locks
+before attempting to obtain a lock. The default behaviour of
+using the current time allows for expiring old locks if that
+is good enough for your application. Using PIDs could be
+used to clean out stale locks referring to the same client
+host, etc.
 
 =head1 METHODS
 
@@ -145,7 +205,7 @@ FIXME explain gotchas about leaving locks around...
 Given a hash ref with options, attempts to obtain a lock in
 the pool. On success, returns the lock object, otherwise undef.
 
-Required options:
+Required named parameters:
 
 =over 2
 
@@ -153,6 +213,25 @@ Required options:
 
 The maximum no. of locks (and thus usually processes)
 to allow at one time.
+
+=item C<redis_conn>
+
+A Redis connection object. See L<Redis>.
+
+=item C<key_name>
+
+Indicates the Redis key to use for storing the lock hash.
+
+=back
+
+Options:
+
+=over 2
+
+=item C<proc_info>
+
+If provided, this string will be stored in the value slot for
+the lock obtained. Defaults to current client time (C<time()>).
 
 =back
 
