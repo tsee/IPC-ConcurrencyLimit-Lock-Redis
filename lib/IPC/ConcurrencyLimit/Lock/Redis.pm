@@ -192,16 +192,10 @@ sub DESTROY {
 }
 
 
-# FIXME This nasty contoction implements clearing locks that are older than
-#       the given cutoff. Alas, what we'd really want is checking for stuff
-#       that hasn't seen a heartbeat since X. That would require munging/updating
-#       the UUID that's in Redis whenever we send a heartbeat. Until that's done
-#       or I've come up with a better strategy, this is not considered part of the
-#       API.
-
 # This is so ugly because we compile slightly different code depending on whether
 # we're running on a perl that can do big-endian-forced-quads or not.
 # FIXME Will work on 64bit perls only. Implementation for 32bit integers welcome.
+# FIXME is this worth it or should it just do a run-time perl version check like heartbeat()?
 eval(<<'PRE' . ($] ge '5.010' ? <<'NEW_PERL' : <<'OLD_PERL') . <<'POST')
 sub clear_old_locks {
   my ($class, $redis_conn, $key_name, $cutoff) = @_;
@@ -375,6 +369,25 @@ This C<IPC::ConcurrencyLimit::Lock> subclass implements a
 heartbeat method that check whether the UUID and C<proc_info>
 on the server is still the same as the UUID and C<proc_info>
 properties of the object.
+
+Whenever called (successfully), updates the time portion of the
+UUID to the current time in both client and server.
+
+=head2 clear_old_locks
+
+Class method!
+
+Given a Redis connection object, a key name for the lock,
+and a cutoff time stamp (in seconds, potentially fractional),
+removes all locks in the given key that are older than the
+provided cutoff time stamp.
+
+This is only going to work on 64bit perls right now, sorry.
+Patches welcome.
+
+Since heartbeat() updates the UUID timestamp, the cutoff refers
+to the most recent heartbeat, not to the original lock creation
+time. But that is what you usually want anyway.
 
 =head1 SEE ALSO
 
