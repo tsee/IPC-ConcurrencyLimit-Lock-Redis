@@ -26,9 +26,8 @@ use Class::XSAccessor
     uuid
   )];
 
-# TODO optional expire
 our $LuaScript_GetLock = q{
-  local key = KEYS[1]
+  local key       = KEYS[1]
   local max_procs = ARGV[1]
   local proc_info = ARGV[2]
   local i
@@ -45,13 +44,46 @@ our $LuaScript_GetLock = q{
 };
 our $LuaScriptHash_GetLock = Digest::SHA1::sha1_hex($LuaScript_GetLock);
 
+# FIXME should this also check the uuid/etc like ClearOldLock?
 our $LuaScript_ReleaseLock = q{
-  local key = KEYS[1]
+  local key    = KEYS[1]
   local lockno = ARGV[1]
   redis.call('hdel', key, lockno)
   return 1
 };
 our $LuaScriptHash_ReleaseLock = Digest::SHA1::sha1_hex($LuaScript_ReleaseLock);
+
+
+# FIXME use this for heartbeat: Generate new data with update time
+our $LuaScript_UpdateUUID = q{
+  local key     = KEYS[1]
+  local lockno  = ARGV[1]
+  local olddata = ARGV[2]
+  local newdata = ARGV[3]
+  if redis.call('hget', key, lockno) == olddata then
+    redis.call('hset', key, lockno, newdata)
+    return 1
+  end
+  return 0
+};
+our $LuaScriptHash_UpdateUUID = Digest::SHA1::sha1_hex($LuaScript_UpdateUUID);
+
+our $LuaScript_ClearOldLock = q{
+  local key       = KEYS[1]
+  local id        = ARGV[1]
+  local proc_info = ARGV[2]
+
+  local cleared = 0
+
+  local x = redis.call('hget', key, id)
+  if x == proc_info then
+    redis.call('hdel', key, id)
+    cleared = 1
+  end
+
+  return cleared
+};
+our $LuaScriptHash_ClearOldLock = Digest::SHA1::sha1_hex($LuaScript_ClearOldLock);
 
 
 sub new {
@@ -136,6 +168,46 @@ sub DESTROY {
   my $self = shift;
   $self->_release_lock();
 }
+
+
+# FIXME This nasty contoction implements clearing locks that are older than
+#       the given cutoff. Alas, what we'd really want is checking for stuff
+#       that hasn't seen a heartbeat since X. That would require munging/updating
+#       the UUID that's in Redis whenever we send a heartbeat. Until that's done
+#       or I've come up with a better strategy, this is not considered part of the
+#       API.
+
+# This is so ugly because we compile slightly different code depending on whether
+# we're running on a perl that can do big-endian-forced-quads or not.
+# FIXME Will work on 64bit perls only. Implementation for 32bit integers welcome.
+eval(<<'PRE' . ($] ge '5.010' ? <<'NEW_PERL' : <<'OLD_PERL') . <<'POST')
+sub clear_old_locks {
+  my ($class, $redis_conn, $key_name, $cutoff) = @_;
+
+  my %hash = $redis_conn->hgetall($key_name);
+  return if not keys(%hash);
+  my $ncleared = 0;
+  foreach my $lockid (keys %hash) {
+PRE
+    my ($quad) = unpack("Q>", $hash{$lockid});
+    $quad -= $quad % 16; # 60 bit only
+NEW_PERL
+    my ($x, $y) = unpack("N2", $hash{$lockid});
+    $y -= $y % 16; # 60 bit only
+    my $quad = $x*2**32 + $y;
+OLD_PERL
+    if ($quad/1e7 < $cutoff) {
+      $ncleared += $redis_conn->eval($LuaScript_ClearOldLock, 1, $key_name, $lockid, $hash{$lockid});
+    }
+  }
+  return $ncleared;
+}
+1
+POST
+or do {
+  my $err = $@ || 'Zombie error';
+  die "Failed to compile clear_old_locks code: $err";
+};
 
 1;
 

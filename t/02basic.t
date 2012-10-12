@@ -143,5 +143,23 @@ SCOPE: {
   }
 }
 
+# Nasty clear_old_locks test
+SCOPE: {
+  my $limit = IPC::ConcurrencyLimit->new(%args);
+  isa_ok($limit, 'IPC::ConcurrencyLimit');
+
+  my $id = $limit->get_lock;
+  is($id, 1, 'First and only lock has id 1');
+
+  my $lock = $limit->{lock_obj};
+  $lock->{id} = 0; # mwuahah
+  my $conn = $lock->redis_conn;
+  my $n = IPC::ConcurrencyLimit::Lock::Redis->clear_old_locks($conn, $args{key_name}, 0);
+  is($n, 0);
+
+  $n = IPC::ConcurrencyLimit::Lock::Redis->clear_old_locks($conn, $args{key_name}, time+1);
+  is($n, 1);
+}
+
 done_testing;
 
