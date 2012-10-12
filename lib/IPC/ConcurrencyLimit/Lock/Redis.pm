@@ -9,7 +9,8 @@ use Carp qw(croak);
 use Redis;
 use Redis::ScriptCache;
 use Digest::SHA1 ();
-use Data::UUID::MT;
+use Data::UUID::MT ();
+use Time::HiRes ();
 
 our $UUIDGenerator = Data::UUID::MT->new(version => "4s");
 
@@ -100,6 +101,7 @@ sub new {
   my $sc = Redis::ScriptCache->new(redis_conn => $redis_conn);
   $sc->register_script(\$LuaScript_GetLock, $LuaScriptHash_GetLock);
   $sc->register_script(\$LuaScript_ReleaseLock, $LuaScriptHash_ReleaseLock);
+  $sc->register_script(\$LuaScript_UpdateUUID, $LuaScriptHash_UpdateUUID);
 
   my $proc_info = $opt->{proc_info};
   $proc_info = '' if not defined $proc_info;
@@ -147,19 +149,39 @@ sub _release_lock {
   $self->{id} = undef;
 }
 
+sub _updated_uuid {
+  my ($self) = @_;
+  my $old_uuid = $self->uuid;
+  my $new_uuid = $UUIDGenerator->create;
+  substr($new_uuid, 8, 8) = substr($old_uuid, 8, 8);
+  vec($new_uuid, 15, 4) = vec($old_uuid, 15, 4);
+  return $new_uuid;
+}
+
 sub heartbeat {
   my $self = shift;
   my $conn = $self->redis_conn;
   return() if not $conn;
 
-  my $srv_proc_info;
-  eval { $srv_proc_info = $conn->hget($self->key_name, $self->id); 1 }
-  or return(); # server gone away?
+  my $proc_info = $self->proc_info;
+  my $new_uuid = $self->_updated_uuid;
+  my $olddata = $self->uuid . "-" . $proc_info;
+  my $newdata = $new_uuid . "-" . $proc_info;
 
-  if (not defined $srv_proc_info
-      or not $srv_proc_info eq $self->uuid . "-" . $self->proc_info) {
-    return(); # lock was acquired by somebody else
+  my $ok;
+  eval {
+    $ok = $self->script_cache->run_script(
+      $LuaScriptHash_UpdateUUID,
+      [ 1, $self->key_name, $self->id, $olddata, $newdata ]
+    );
+    1
+  } or return(); # server gone away?
+
+  if (not $ok) {
+    return(); # lock was acquired by somebody else?
   }
+
+  $self->{uuid} = $new_uuid;
   return 1; # probably all fine
 }
 
