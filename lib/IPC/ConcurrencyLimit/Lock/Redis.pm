@@ -9,12 +9,22 @@ use Carp qw(croak);
 use Redis;
 use Redis::ScriptCache;
 use Digest::SHA1 ();
+use Data::UUID::MT;
+
+our $UUIDGenerator = Data::UUID::MT->new(version => "4s");
 
 use IPC::ConcurrencyLimit::Lock;
 our @ISA = qw(IPC::ConcurrencyLimit::Lock);
 
 use Class::XSAccessor
-  getters => [qw(redis_conn max_procs key_name proc_info script_cache)];
+  getters => [qw(
+    redis_conn
+    max_procs
+    key_name
+    proc_info
+    script_cache
+    uuid
+  )];
 
 # TODO optional expire
 our $LuaScript_GetLock = q{
@@ -60,7 +70,8 @@ sub new {
   $sc->register_script(\$LuaScript_ReleaseLock, $LuaScriptHash_ReleaseLock);
 
   my $proc_info = $opt->{proc_info};
-  $proc_info = time() if not defined $proc_info;
+  $proc_info = '' if not defined $proc_info;
+  my $uuid = $UUIDGenerator->create;
   my $self = bless {
     max_procs    => $max_procs,
     redis_conn   => $redis_conn,
@@ -68,19 +79,20 @@ sub new {
     id           => undef,
     script_cache => $sc,
     proc_info    => $proc_info,
+    uuid         => $uuid,
   } => $class;
 
-  $self->_get_lock($key_name, $max_procs, $sc, $proc_info)
+  $self->_get_lock($key_name, $max_procs, $sc, $uuid . "-" . $proc_info)
     or return undef;
 
   return $self;
 }
 
 sub _get_lock {
-  my ($self, $key, $max_procs, $script_cache, $proc_info) = @_;
+  my ($self, $key, $max_procs, $script_cache, $uuid_proc_info) = @_;
 
   my ($rv) = $script_cache->run_script(
-    $LuaScriptHash_GetLock, [1, $key, $max_procs, $proc_info]
+    $LuaScriptHash_GetLock, [1, $key, $max_procs, $uuid_proc_info]
   );
 
   if (defined $rv and $rv > 0) {
@@ -101,6 +113,22 @@ sub _release_lock {
   );
 
   $self->{id} = undef;
+}
+
+sub heartbeat {
+  my $self = shift;
+  my $conn = $self->redis_conn;
+  return() if not $conn;
+
+  my $srv_proc_info;
+  eval { $srv_proc_info = $conn->hget($self->key_name, $self->id); 1 }
+  or return(); # server gone away?
+
+  if (not defined $srv_proc_info
+      or not $srv_proc_info eq $self->uuid . "-" . $self->proc_info) {
+    return(); # lock was acquired by somebody else
+  }
+  return 1; # probably all fine
 }
 
 sub DESTROY {
@@ -131,7 +159,8 @@ IPC::ConcurrencyLimit::Lock::Redis - Locking via Redis
     max_procs  => 1, # defaults to 1
     redis_conn => $redis,
     key_name   => "mylock",
-    # proc_info  => "...", # optional value to store. Default: time()
+    # optional value to store. Will be prefixed with UUID (see below)
+    # proc_info  => "...",
   );
   
   my $id = $limit->get_lock;
@@ -171,32 +200,42 @@ of 5 (default: 1) and three out of five lock instances taken,
 the lock structure in Redis would look as follows:
 
   "mylock": {
-                "1": "some info",
-                "2": "some other",
-                "3": "yet other info"
+                "1": "BINARYUUID1-some info",
+                "2": "BINARYUUID2-some other",
+                "3": "BINARYUUID3-yet other info"
             }
+
+where BINARYUUIDX is understood to be a 128bit/16byte binary UUID
+whose first 60bits are a microsecond-precision timestamp in binary,
+from high to low significance bits. See "version 4s" UUIDs
+as described in L<Data::UUID::MT>.
 
 If subsequently lock number 2 is released, the structure
 becomes:
 
   "mylock": {
-                "1": "some info",
-                "3": "yet other info"
+                "1": "BINARYUUID1-some info",
+                "3": "BINARYUUID3-yet other info"
             }
 
 The next lock to be obtained would again use entry number 2.
 When creating a lock object, you may pass a C<proc_info>
 parameter. This parameter (string) will be used as the value
-of the corresponding hash entry (C<"some info">, etc. above).
-The C<proc_info> value defaults to the current epoch time
-on the client.
+of the corresponding hash entry after prepending the lock's UUID
+(So C<proc_info> would be C<"some info">, etc. above).
+By default, C<proc_info> is the empty string.
 
-The C<proc_info> properties may be used to evict stale locks
-before attempting to obtain a lock. The default behaviour of
-using the current time allows for expiring old locks if that
-is good enough for your application. Using PIDs could be
-used to clean out stale locks referring to the same client
-host, etc.
+The combination of the time-ordered UUID and custom C<proc_info>
+properties may be used to evict stale locks
+before attempting to obtain a new lock. The default behaviour of
+using the current time as part of the UUID allows for expiring
+old locks if that is good enough for your application.
+Using PIDs in C<proc_info> could be used to clean out stale
+locks referring to the same client host, etc.
+
+Most importantly, however, the UUID is (with on certainty bordering
+probability) unique so that you can use to clearly indicate whether
+you lost the lock if it changes from under you (cf. C<heartbeat>).
 
 =head1 METHODS
 
@@ -231,9 +270,29 @@ Options:
 =item C<proc_info>
 
 If provided, this string will be stored in the value slot for
-the lock obtained. Defaults to current client time (C<time()>).
+the lock obtained together with a UUID (see above).
+Defaults to the empty string.
 
 =back
+
+=head2 heartbeat
+
+This C<IPC::ConcurrencyLimit::Lock> subclass implements a
+heartbeat method that check whether the UUID and C<proc_info>
+on the server is still the same as the UUID and C<proc_info>
+properties of the object.
+
+=head1 SEE ALSO
+
+L<IPC::ConcurrencyLimit> and the abstract lock base class
+L<IPC::ConcurrencyLimit::Lock>.
+
+L<Redis>, the Perl-Redis interface used by this module.
+
+L<Redis::ScriptCache>, which makes Lua-scripting with Redis a bit
+less work.
+
+L<Data::UUID::MT>, whose "version 4s" UUIDs are used here.
 
 =head1 AUTHOR
 

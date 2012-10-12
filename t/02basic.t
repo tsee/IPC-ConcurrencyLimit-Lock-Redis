@@ -71,7 +71,18 @@ SCOPE: {
   my $id2 = $limit2->get_lock();
   is($id2, undef, 'Cannot get second lock');
 
+  ok($limit->heartbeat, 'Lock alive');
+
+  SCOPE: {
+    my $_lock = $limit->{lock_obj}; # breaking encapsulation
+    is($conn->hget($_lock->key_name, $_lock->id),
+       $_lock->uuid . "-" . $_lock->proc_info,
+       "UUID/procinfo ok");
+  }
+
   is($limit->release_lock(), 1, 'Lock released');
+  ok(!$limit->heartbeat, 'Lock not alive');
+
   $id2 = $limit2->get_lock();
   is($id2, 1, 'Got other lock after first was released');
 }
