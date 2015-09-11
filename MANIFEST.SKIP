@@ -7,3 +7,4 @@ Makefile\.bak$
 \.git/
 MYMETA\.(?:yml|json)$
 redis_connect_data$
+dist.ini$
