@@ -8,7 +8,6 @@ our $VERSION = '0.01';
 use Carp qw(croak);
 use Redis;
 use Redis::ScriptCache;
-use Digest::SHA1 ();
 use Data::UUID::MT ();
 use Time::HiRes ();
 
@@ -43,7 +42,6 @@ our $LuaScript_GetLock = q{
 
   return 0
 };
-our $LuaScriptHash_GetLock = Digest::SHA1::sha1_hex($LuaScript_GetLock);
 
 # FIXME should this also check the uuid/etc like ClearOldLock?
 our $LuaScript_ReleaseLock = q{
@@ -52,7 +50,6 @@ our $LuaScript_ReleaseLock = q{
   redis.call('hdel', key, lockno)
   return 1
 };
-our $LuaScriptHash_ReleaseLock = Digest::SHA1::sha1_hex($LuaScript_ReleaseLock);
 
 
 # FIXME use this for heartbeat: Generate new data with update time
@@ -67,7 +64,6 @@ our $LuaScript_UpdateUUID = q{
   end
   return 0
 };
-our $LuaScriptHash_UpdateUUID = Digest::SHA1::sha1_hex($LuaScript_UpdateUUID);
 
 our $LuaScript_ClearOldLock = q{
   local key       = KEYS[1]
@@ -84,7 +80,6 @@ our $LuaScript_ClearOldLock = q{
 
   return cleared
 };
-our $LuaScriptHash_ClearOldLock = Digest::SHA1::sha1_hex($LuaScript_ClearOldLock);
 
 
 sub new {
@@ -99,9 +94,9 @@ sub new {
     or croak("Need a 'key_name' parameter");
 
   my $sc = Redis::ScriptCache->new(redis_conn => $redis_conn);
-  $sc->register_script(\$LuaScript_GetLock, $LuaScriptHash_GetLock);
-  $sc->register_script(\$LuaScript_ReleaseLock, $LuaScriptHash_ReleaseLock);
-  $sc->register_script(\$LuaScript_UpdateUUID, $LuaScriptHash_UpdateUUID);
+  $sc->register_script('get_lock', \$LuaScript_GetLock);
+  $sc->register_script('release_lock', \$LuaScript_ReleaseLock);
+  $sc->register_script('update_uuid', \$LuaScript_UpdateUUID);
 
   my $proc_info = $opt->{proc_info};
   $proc_info = '' if not defined $proc_info;
@@ -126,7 +121,7 @@ sub _get_lock {
   my ($self, $key, $max_procs, $script_cache, $uuid_proc_info) = @_;
 
   my ($rv) = $script_cache->run_script(
-    $LuaScriptHash_GetLock, [1, $key, $max_procs, $uuid_proc_info]
+    'get_lock', [1, $key, $max_procs, $uuid_proc_info]
   );
 
   if (defined $rv and $rv > 0) {
@@ -143,7 +138,7 @@ sub _release_lock {
   return if not $id;
 
   $self->script_cache->run_script(
-    $LuaScriptHash_ReleaseLock, [1, $self->key_name, $id]
+    'release_lock', [1, $self->key_name, $id]
   );
 
   $self->{id} = undef;
@@ -171,7 +166,7 @@ sub heartbeat {
   my $ok;
   eval {
     $ok = $self->script_cache->run_script(
-      $LuaScriptHash_UpdateUUID,
+      'update_uuid',
       [ 1, $self->key_name, $self->id, $olddata, $newdata ]
     );
     1
